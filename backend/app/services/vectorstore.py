@@ -1,29 +1,80 @@
-"""LanceDB vector store with SPECTER2 embeddings."""
+"""LanceDB vector store with ONNX Runtime embeddings."""
 
-import json
 from pathlib import Path
 
 import lancedb
+import numpy as np
+import onnxruntime as ort
 import pyarrow as pa
-from sentence_transformers import SentenceTransformer
+from tokenizers import Tokenizer
 
 from ..config import LANCEDB_DIR
 
 TABLE_NAME = "paper_chunks"
+EMBEDDING_DIM = 384
+MAX_SEQ_LENGTH = 256
 
-# Use a smaller, faster model for initial setup. SPECTER2 can be swapped in later.
-# all-MiniLM-L6-v2 is 80MB vs SPECTER2's 440MB — much faster to download.
-DEFAULT_MODEL = "all-MiniLM-L6-v2"
+# Model path relative to backend directory
+_BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
+MODEL_DIR = _BACKEND_DIR / "models" / "all-MiniLM-L6-v2"
 
-_model: SentenceTransformer | None = None
+_session: ort.InferenceSession | None = None
+_tokenizer: Tokenizer | None = None
 _db: lancedb.DBConnection | None = None
 
 
-def get_model() -> SentenceTransformer:
-    global _model
-    if _model is None:
-        _model = SentenceTransformer(DEFAULT_MODEL)
-    return _model
+def get_tokenizer() -> Tokenizer:
+    global _tokenizer
+    if _tokenizer is None:
+        tok_path = MODEL_DIR / "tokenizer.json"
+        if not tok_path.exists():
+            raise FileNotFoundError(f"Tokenizer not found at {tok_path}")
+        _tokenizer = Tokenizer.from_file(str(tok_path))
+        _tokenizer.enable_padding(length=MAX_SEQ_LENGTH)
+        _tokenizer.enable_truncation(max_length=MAX_SEQ_LENGTH)
+    return _tokenizer
+
+
+def get_session() -> ort.InferenceSession:
+    global _session
+    if _session is None:
+        model_path = MODEL_DIR / "model.onnx"
+        if not model_path.exists():
+            raise FileNotFoundError(f"ONNX model not found at {model_path}")
+        _session = ort.InferenceSession(
+            str(model_path),
+            providers=["CPUExecutionProvider"],
+        )
+    return _session
+
+
+def _encode_single(text: str) -> np.ndarray:
+    """Encode a single text into a normalized embedding."""
+    tokenizer = get_tokenizer()
+    session = get_session()
+
+    encoded = tokenizer.encode(text)
+    input_ids = np.array([encoded.ids], dtype=np.int64)
+    attention_mask = np.array([encoded.attention_mask], dtype=np.int64)
+
+    outputs = session.run(None, {"input_ids": input_ids, "attention_mask": attention_mask})
+    token_embeddings = outputs[0]  # (1, seq_len, 384)
+
+    # Mean pooling
+    expanded_mask = attention_mask[:, :, np.newaxis].astype(np.float32)
+    pooled = np.sum(token_embeddings * expanded_mask, axis=1) / np.maximum(
+        expanded_mask.sum(axis=1), 1e-9
+    )
+
+    # L2 normalize
+    norm = np.linalg.norm(pooled)
+    return pooled[0] / max(norm, 1e-9)
+
+
+def encode(texts: list[str]) -> np.ndarray:
+    """Encode texts into normalized embeddings using ONNX Runtime."""
+    embeddings = [_encode_single(t) for t in texts]
+    return np.array(embeddings)
 
 
 def get_db() -> lancedb.DBConnection:
@@ -36,7 +87,7 @@ def get_db() -> lancedb.DBConnection:
 
 SCHEMA = pa.schema(
     [
-        pa.field("vector", pa.list_(pa.float32(), 384)),  # all-MiniLM-L6-v2 = 384-dim
+        pa.field("vector", pa.list_(pa.float32(), EMBEDDING_DIM)),
         pa.field("chunk_id", pa.utf8()),
         pa.field("doc_id", pa.utf8()),
         pa.field("text", pa.utf8()),
@@ -68,15 +119,19 @@ def embed_and_store(chunks_data: list[dict], title: str, authors: str, year: int
     if not chunks_data:
         return 0
 
-    model = get_model()
     texts = [c["text"] for c in chunks_data]
 
-    # Batch encode
-    embeddings = model.encode(texts, show_progress_bar=False, batch_size=32)
+    # Batch encode (process in chunks of 32 to limit memory)
+    all_embeddings = []
+    for i in range(0, len(texts), 32):
+        batch = texts[i : i + 32]
+        embeddings = encode(batch)
+        all_embeddings.append(embeddings)
+    all_embeddings = np.vstack(all_embeddings)
 
     # Build records
     records = []
-    for chunk, embedding in zip(chunks_data, embeddings):
+    for chunk, embedding in zip(chunks_data, all_embeddings):
         records.append(
             {
                 "vector": embedding.tolist(),
@@ -105,8 +160,7 @@ def embed_and_store(chunks_data: list[dict], title: str, authors: str, year: int
 
 def search(query: str, limit: int = 20, doc_id: str | None = None) -> list[dict]:
     """Search for similar chunks."""
-    model = get_model()
-    query_embedding = model.encode([query])[0].tolist()
+    query_embedding = encode([query])[0].tolist()
 
     table = get_or_create_table()
     results = table.search(query_embedding).limit(limit)

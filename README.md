@@ -8,7 +8,7 @@ An academic tool for researchers to import, parse, and analyze research papers. 
 - **Frontend**: React + Tailwind CSS + TypeScript
 - **Backend**: Python 3.11+ (FastAPI, runs as Tauri sidecar)
 - **AI**: Claude Code CLI (`claude -p`)
-- **Embedding**: sentence-transformers (all-MiniLM-L6-v2, 384-dim)
+- **Embedding**: ONNX Runtime + all-MiniLM-L6-v2 (384-dim, ~88 MB)
 - **Vector DB**: LanceDB (embedded, no server)
 - **Relational DB**: SQLite
 - **PDF Parsing**: PyMuPDF + pdfplumber
@@ -70,7 +70,7 @@ python -m uvicorn app.main:app --port 8765
 - Preserves metadata per chunk: section, page numbers, paragraph index, character offsets
 
 ### Phase 3: Vectorize
-- Embeds chunks using sentence-transformers (all-MiniLM-L6-v2)
+- Embeds chunks using ONNX Runtime (all-MiniLM-L6-v2, no PyTorch dependency)
 - Stores vectors + metadata in LanceDB (embedded, no server)
 - Incremental indexing (new papers added without re-embedding)
 

@@ -8,7 +8,7 @@ This is an academic tool to help researchers read and analyse papers, save the a
 - Backend: Python 3.11+ (FastAPI, packaged as Tauri sidecar via PyInstaller)
 - Frontend: React + Tailwind CSS
 - AI model: Claude Code CLI (`claude -p`)
-- Embedding: SPECTER2 (AllenAI) — local, academic-optimized, 768-dim
+- Embedding: ONNX Runtime + all-MiniLM-L6-v2 (local, 384-dim, ~88 MB)
 - Vector DB: LanceDB (embedded, Python SDK)
 - Relational DB: SQLite (via `tauri-plugin-sql`)
 - PDF parsing: PyMuPDF (primary) + pdfplumber (tables)
@@ -18,7 +18,8 @@ This is an academic tool to help researchers read and analyse papers, save the a
 
 ```
 lancedb
-sentence-transformers  # for SPECTER2
+onnxruntime
+tokenizers
 PyMuPDF
 pdfplumber
 openpyxl
@@ -58,10 +59,11 @@ Considerations:
 
 ## Embedding Model
 
-- **Default**: SPECTER2 from AllenAI (~440MB, 768-dim)
-  - Trained on academic papers from Semantic Scholar
-  - Offline-capable, runs locally
-  - Excellent retrieval quality for scientific text
+- **Default**: all-MiniLM-L6-v2 via ONNX Runtime (~88 MB total)
+  - Runs locally via ONNX Runtime (no PyTorch dependency)
+  - 384-dim embeddings, good retrieval quality
+  - Offline-capable
+  - Can be swapped to SPECTER2 or other models by exporting to ONNX
 - **Optional upgrade**: Voyage AI `voyage-3-large` (API-based, 1024-dim) when online
 - The embedding model handles recall (retrieving candidate chunks); Claude handles precision (exact field extraction from retrieved chunks)
 

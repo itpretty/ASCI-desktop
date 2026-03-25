@@ -21,6 +21,14 @@ npm-debug.log*
 # OS
 .DS_Store
 
+# ONNX model files (large, download separately)
+backend/models/
+
+# PyInstaller build artifacts
+backend/dist/
+backend/build/
+backend/*.spec
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
