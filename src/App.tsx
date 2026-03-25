@@ -24,21 +24,28 @@ function App() {
   const [activePhase, setActivePhase] = useState(1);
 
   useEffect(() => {
+    let failCount = 0;
     const checkBackend = async () => {
       try {
         const resp = await fetch(`${API_BASE}/health`);
         if (resp.ok) {
           setBackendStatus("online");
+          failCount = 0;
         } else {
-          setBackendStatus("offline");
+          failCount++;
         }
       } catch {
+        failCount++;
+      }
+      // Only show offline after 3 consecutive failures (~15s),
+      // giving the sidecar time to start
+      if (failCount >= 3) {
         setBackendStatus("offline");
       }
     };
 
     checkBackend();
-    const interval = setInterval(checkBackend, 5000);
+    const interval = setInterval(checkBackend, 3000);
     return () => clearInterval(interval);
   }, []);
 
