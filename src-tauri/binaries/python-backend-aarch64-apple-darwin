@@ -1,0 +1,26 @@
+#!/bin/bash
+# Sidecar wrapper: activates the Python venv and runs the backend server.
+# For production, replace this with a PyInstaller-frozen binary.
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Find the backend directory (relative to the binary location)
+# In dev: src-tauri/binaries/ -> ../../backend
+# In bundle: Contents/MacOS/ -> look for backend relative to app
+BACKEND_DIR="$SCRIPT_DIR/../../backend"
+if [ ! -d "$BACKEND_DIR/app" ]; then
+    BACKEND_DIR="$SCRIPT_DIR/../backend"
+fi
+if [ ! -d "$BACKEND_DIR/app" ]; then
+    # Try absolute fallback for dev
+    BACKEND_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)/backend"
+fi
+
+cd "$BACKEND_DIR" || exit 1
+
+# Activate venv
+if [ -f ".venv/bin/activate" ]; then
+    source .venv/bin/activate
+fi
+
+exec python -m uvicorn app.main:app --host 127.0.0.1 --port "${1:-8765}" --log-level warning

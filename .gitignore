@@ -1,3 +1,26 @@
+# Node
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Tauri build output
+src-tauri/target/
+src-tauri/gen/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Editor
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.sw?
+
+# OS
+.DS_Store
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
