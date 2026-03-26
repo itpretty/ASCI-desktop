@@ -2,6 +2,14 @@ import { useState, useCallback, useEffect, useRef } from "react";
 
 const API = "http://127.0.0.1:8765";
 
+function formatFieldValue(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  // Arrays and objects: pretty-print as JSON
+  return JSON.stringify(value, null, 2);
+}
+
 interface Session {
   id: string;
   prompt_text: string | null;
@@ -104,12 +112,14 @@ export function ResultsPanel() {
           onChange={(e) => setSelectedSession(e.target.value || null)}
         >
           <option value="">All sessions</option>
-          {sessions.map((s) => (
-            <option key={s.id} value={s.id}>
-              {s.id} — {s.prompt_text?.slice(0, 40) || "Template search"} (
-              {s.result_count} results)
-            </option>
-          ))}
+          {sessions
+            .filter((s) => s.result_count > 0)
+            .map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.id} — {s.prompt_text?.slice(0, 40) || "Template search"} (
+                {s.result_count} results)
+              </option>
+            ))}
         </select>
         <button
           onClick={refreshSessions}
@@ -156,17 +166,27 @@ export function ResultsPanel() {
               </div>
 
               <div className="space-y-1">
-                {Object.entries(fields).map(([key, value]) => (
-                  <div key={key} className="flex gap-2 text-sm">
-                    <span className="min-w-[140px] text-gray-500 truncate">
-                      {key}:
-                    </span>
-                    <EditableField
-                      value={String(value ?? "")}
-                      onSave={(newVal) => handleEdit(r.id, key, newVal)}
-                    />
-                  </div>
-                ))}
+                {Object.entries(fields).map(([key, value]) => {
+                  const isComplex =
+                    typeof value === "object" && value !== null;
+                  return (
+                    <div key={key} className={isComplex ? "text-sm" : "flex gap-2 text-sm"}>
+                      <span className="min-w-[140px] text-gray-500 shrink-0">
+                        {key}:
+                      </span>
+                      {isComplex ? (
+                        <pre className="mt-1 overflow-x-auto rounded bg-gray-50 p-2 text-xs whitespace-pre-wrap">
+                          {JSON.stringify(value, null, 2)}
+                        </pre>
+                      ) : (
+                        <EditableField
+                          value={formatFieldValue(value)}
+                          onSave={(newVal) => handleEdit(r.id, key, newVal)}
+                        />
+                      )}
+                    </div>
+                  );
+                })}
               </div>
 
               {Object.keys(citations).length > 0 && (

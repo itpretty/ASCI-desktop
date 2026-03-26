@@ -1,13 +1,13 @@
 @import "tailwindcss";
 
 /* Normalize control heights */
-select,
+select:not([multiple]),
 button {
   height: 38px;
   box-sizing: border-box;
 }
 
-/* Exclude textareas styled as buttons and inline tiny buttons */
+/* Exclude inline tiny buttons */
 button.text-xs,
 button.text-gray-400 {
   height: auto;

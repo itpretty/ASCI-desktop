@@ -247,31 +247,17 @@ Storage estimates:
 
 #### Template setup
 
-- User uploads input template in markdown format and enters prompts alongside to explain further requirements if any
-  - The template may be a SKILL markdown file (see `doc/raw/SKILL.md` for example)
-  - AI model parses both the template file and entered prompts
-  - Any of input template and prompts may be empty but both cannot be empty at the same time
-- User uploads output template
-  - It may be in any format
-  - AI model parses the output file to better match the input template
+User provides two templates:
 
-#### Template parsing (AI-assisted)
+1. **Import Requirements** (.md or .txt only): Defines what to search for and how to filter data
+   - Describes the fields/data points to extract from papers
+   - May include extraction rules, decision trees, examples (e.g., a SKILL file — see `doc/raw/SKILL.md`)
+   - User can also enter additional prompts to explain further requirements
+   - At least one of template file or prompt text is required
 
-1. **Schema extraction**: Send template to Claude to extract structured JSON field definitions (field name, type, description, extraction rules, examples). Cache per template content hash.
-2. **Output template parsing**: Similarly extract expected output fields and structure.
-
-#### Field matching
-
-Three-pass matching between input and output template fields:
-1. **Exact match**: field names are identical
-2. **Fuzzy match**: string similarity (Levenshtein distance)
-3. **Semantic match**: Claude determines if an output field can be derived from input fields
-
-Each output field classified as: Matched / Derivable / Unmatched / Ambiguous
-
-- If there are Unmatched fields, list them in popup dialog and direct user to edit input template again until all are matched
-  - Add `Ignore` option for users to skip mismatches
-- **V1 scope**: Support SKILL-style structured markdown templates. Defer truly arbitrary format support.
+2. **Export Results** (any format): Defines how to generate and present the extracted data
+   - Specifies output format, column layout, and data organization
+   - May include formatting rules, value constraints, and validation criteria
 
 #### Citation/provenance tracking
 

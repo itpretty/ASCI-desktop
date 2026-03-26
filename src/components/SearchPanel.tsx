@@ -1,4 +1,6 @@
 import { useState, useCallback, useEffect } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
+import { readTextFile } from "@tauri-apps/plugin-fs";
 
 const API = "http://127.0.0.1:8765";
 
@@ -10,32 +12,34 @@ interface Template {
   created_at: string;
 }
 
-interface SearchResult {
-  doc_id: string;
-  doc_title: string;
-  fields: Record<string, unknown>;
-  citations: Record<string, unknown>;
+interface ProgressEntry {
+  type: string;
+  paper?: string;
+  error?: string;
+  reason?: string;
+  fields?: Record<string, unknown>;
+  current?: number;
+  total?: number;
+  session_id?: string;
+  completed?: number;
+  errors?: number;
 }
 
 export function SearchPanel() {
   const [templates, setTemplates] = useState<Template[]>([]);
-  const [aiAvailable, setAiAvailable] = useState<boolean | null>(null);
+  const [aiStatus, setAiStatus] = useState<{
+    available: boolean;
+    error: string | null;
+  } | null>(null);
   const [searching, setSearching] = useState(false);
 
-  // Template upload
-  const [templateName, setTemplateName] = useState("");
-  const [templateType, setTemplateType] = useState<"input" | "output">("input");
-  const [templateContent, setTemplateContent] = useState("");
-
   // Search config
-  const [selectedInput, setSelectedInput] = useState("");
-  const [selectedOutput, setSelectedOutput] = useState("");
   const [promptText, setPromptText] = useState("");
 
-  // Results
-  const [results, setResults] = useState<SearchResult[]>([]);
-  const [errors, setErrors] = useState<string[]>([]);
-  const [sessionId, setSessionId] = useState<string | null>(null);
+  // Progress
+  const [progress, setProgress] = useState<ProgressEntry[]>([]);
+  const [currentStatus, setCurrentStatus] = useState("");
+  const [, setSessionId] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -44,7 +48,7 @@ export function SearchPanel() {
         fetch(`${API}/search/ai-status`).then((r) => r.json()),
       ]);
       setTemplates(tRes);
-      setAiAvailable(aiRes.available);
+      setAiStatus(aiRes);
     } catch {}
   }, []);
 
@@ -52,190 +56,232 @@ export function SearchPanel() {
     refresh();
   }, [refresh]);
 
-  const handleUploadTemplate = useCallback(async () => {
-    if (!templateName.trim() || !templateContent.trim()) return;
-    await fetch(`${API}/search/templates`, {
+  const handleUploadImportReq = useCallback(async () => {
+    const selected = await open({
+      multiple: false,
+      filters: [{ name: "Text", extensions: ["md", "txt"] }],
+      title: "Select Import Requirements (.md or .txt)",
+    });
+    if (!selected) return;
+    const path = Array.isArray(selected) ? selected[0] : selected;
+    const content = await readTextFile(path);
+    const name = path.split("/").pop() || "import-requirements";
+    const resp = await fetch(`${API}/search/templates`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        name: templateName,
-        type: templateType,
-        format: "markdown",
-        content: templateContent,
-      }),
+      body: JSON.stringify({ name, type: "input", format: "markdown", content }),
     });
-    setTemplateName("");
-    setTemplateContent("");
+    await resp.json();
     await refresh();
-  }, [templateName, templateType, templateContent, refresh]);
+  }, [refresh]);
+
+  const handleUploadExportRes = useCallback(async () => {
+    const selected = await open({
+      multiple: false,
+      title: "Select Export Results Template (any format)",
+    });
+    if (!selected) return;
+    const path = Array.isArray(selected) ? selected[0] : selected;
+    const content = await readTextFile(path);
+    const name = path.split("/").pop() || "export-results";
+    const ext = name.split(".").pop() || "txt";
+    const resp = await fetch(`${API}/search/templates`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, type: "output", format: ext, content }),
+    });
+    await resp.json();
+    await refresh();
+  }, [refresh]);
+
+  const handleDeleteTemplate = useCallback(
+    async (id: string) => {
+      await fetch(`${API}/search/templates/${id}`, { method: "DELETE" });
+      await refresh();
+    },
+    [refresh],
+  );
+
+  const inputTemplates = templates.filter((t) => t.type === "input");
+  const outputTemplates = templates.filter((t) => t.type === "output");
 
   const handleSearch = useCallback(async () => {
-    if (!selectedInput && !promptText.trim()) return;
+    if (inputTemplates.length === 0 && !promptText.trim()) return;
     setSearching(true);
-    setResults([]);
-    setErrors([]);
+    setProgress([]);
+    setCurrentStatus("Starting search...");
+    setSessionId(null);
+
     try {
       const resp = await fetch(`${API}/search/execute`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          input_template_id: selectedInput || null,
-          output_template_id: selectedOutput || null,
+          input_template_id: inputTemplates[0]?.id || null,
+          output_template_id: outputTemplates[0]?.id || null,
           prompt_text: promptText || null,
         }),
       });
-      const data = await resp.json();
+
       if (!resp.ok) {
-        setErrors([data.detail || "Search failed"]);
-      } else {
-        setSessionId(data.session_id);
-        setResults(data.results);
-        setErrors(data.errors);
+        const err = await resp.json();
+        setProgress([{ type: "fatal", error: err.detail || "Search failed" }]);
+        setCurrentStatus("");
+        setSearching(false);
+        return;
+      }
+
+      // Read SSE stream
+      const reader = resp.body?.getReader();
+      const decoder = new TextDecoder();
+
+      if (!reader) {
+        setProgress([{ type: "fatal", error: "No response stream" }]);
+        setSearching(false);
+        return;
+      }
+
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          try {
+            const event: ProgressEntry = JSON.parse(line.slice(6));
+            setProgress((prev) => [...prev, event]);
+
+            if (event.type === "start") {
+              setSessionId(event.session_id || null);
+              setCurrentStatus(`Processing ${event.total} paper${event.total !== 1 ? "s" : ""}...`);
+            } else if (event.type === "progress") {
+              setCurrentStatus(
+                `[${event.current}/${event.total}] Processing: ${event.paper}`,
+              );
+            } else if (event.type === "done") {
+              setCurrentStatus(
+                `Done. ${event.completed} processed, ${event.errors} error${event.errors !== 1 ? "s" : ""}.`,
+              );
+            } else if (event.type === "fatal") {
+              setCurrentStatus("");
+            }
+          } catch {}
+        }
       }
     } catch (e) {
-      setErrors([String(e)]);
+      setProgress((prev) => [
+        ...prev,
+        { type: "fatal", error: String(e) },
+      ]);
+      setCurrentStatus("");
     } finally {
       setSearching(false);
     }
-  }, [selectedInput, selectedOutput, promptText]);
-
-  const inputTemplates = templates.filter((t) => t.type === "input");
-  const outputTemplates = templates.filter((t) => t.type === "output");
+  }, [inputTemplates, outputTemplates, promptText]);
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h2 className="text-lg font-medium">Phase 4: Search &amp; Extract</h2>
-        <div className="flex items-center gap-2 text-sm">
-          <span
-            className={`inline-block h-2 w-2 rounded-full ${
-              aiAvailable === true
-                ? "bg-green-500"
-                : aiAvailable === false
-                  ? "bg-red-500"
-                  : "bg-gray-300"
-            }`}
-          />
-          <span className="text-gray-500">
-            {aiAvailable === true
-              ? "Claude CLI available"
-              : aiAvailable === false
-                ? "Claude CLI not found"
-                : "Checking..."}
-          </span>
+      <h2 className="text-lg font-medium">Phase 4: Search &amp; Extract</h2>
+
+      {/* Templates */}
+      <div className="rounded-lg border border-gray-200 bg-white p-4 space-y-4">
+        <h3 className="text-sm font-medium text-gray-700">Templates</h3>
+
+        <div className="grid grid-cols-2 gap-6">
+          {/* Import Requirements column */}
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <label className="block text-xs text-gray-500">
+                Import Requirements (.md / .txt)
+              </label>
+              <button
+                onClick={handleUploadImportReq}
+                className="rounded-md border border-gray-300 px-3 py-1 text-xs text-gray-700 hover:bg-gray-50"
+              >
+                Select...
+              </button>
+            </div>
+            {inputTemplates.length === 0 && (
+              <p className="text-xs text-gray-400 py-2">No templates uploaded</p>
+            )}
+            {inputTemplates.map((t) => (
+              <div
+                key={t.id}
+                className="flex justify-between items-center py-1 text-sm text-gray-500"
+              >
+                <span className="font-medium text-gray-700 truncate">
+                  {t.name}
+                </span>
+                <button
+                  onClick={() => handleDeleteTemplate(t.id)}
+                  className="text-gray-400 hover:text-red-500 text-xs shrink-0 ml-2"
+                >
+                  Remove
+                </button>
+              </div>
+            ))}
+          </div>
+
+          {/* Export Results column */}
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <label className="block text-xs text-gray-500">
+                Export Results (any format)
+              </label>
+              <button
+                onClick={handleUploadExportRes}
+                className="rounded-md border border-gray-300 px-3 py-1 text-xs text-gray-700 hover:bg-gray-50"
+              >
+                Select...
+              </button>
+            </div>
+            {outputTemplates.length === 0 && (
+              <p className="text-xs text-gray-400 py-2">No templates uploaded</p>
+            )}
+            {outputTemplates.map((t) => (
+              <div
+                key={t.id}
+                className="flex justify-between items-center py-1 text-sm text-gray-500"
+              >
+                <span className="font-medium text-gray-700 truncate">
+                  {t.name}
+                </span>
+                <button
+                  onClick={() => handleDeleteTemplate(t.id)}
+                  className="text-gray-400 hover:text-red-500 text-xs shrink-0 ml-2"
+                >
+                  Remove
+                </button>
+              </div>
+            ))}
+          </div>
         </div>
       </div>
 
-      {/* Template upload */}
-      <details className="rounded-lg border border-gray-200 bg-white">
-        <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-gray-700">
-          Upload Template ({templates.length} uploaded)
-        </summary>
-        <div className="border-t border-gray-200 p-4 space-y-3">
-          <div className="flex gap-3">
-            <input
-              className="flex-1 rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:outline-none"
-              placeholder="Template name"
-              value={templateName}
-              onChange={(e) => setTemplateName(e.target.value)}
-            />
-            <select
-              className="rounded-md border border-gray-300 px-3 py-2 text-sm"
-              value={templateType}
-              onChange={(e) => setTemplateType(e.target.value as "input" | "output")}
-            >
-              <option value="input">Input</option>
-              <option value="output">Output</option>
-            </select>
-          </div>
-          <textarea
-            className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm font-mono focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:outline-none"
-            rows={6}
-            placeholder="Paste template content (markdown)..."
-            value={templateContent}
-            onChange={(e) => setTemplateContent(e.target.value)}
-          />
-          <button
-            onClick={handleUploadTemplate}
-            disabled={!templateName.trim() || !templateContent.trim()}
-            className="rounded-md bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            Upload
-          </button>
-
-          {templates.length > 0 && (
-            <div className="mt-3 text-sm text-gray-500">
-              {templates.map((t) => (
-                <div key={t.id} className="flex justify-between py-1">
-                  <span>
-                    <span className="font-medium text-gray-700">{t.name}</span>{" "}
-                    <span className="text-xs">({t.type})</span>
-                  </span>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      </details>
-
-      {/* Search configuration */}
-      <div className="rounded-lg border border-gray-200 bg-white p-4 space-y-4">
-        <h3 className="text-sm font-medium text-gray-700">Search Configuration</h3>
-
-        <div className="grid grid-cols-2 gap-4">
-          <div>
-            <label className="mb-1 block text-xs text-gray-500">
-              Input Template
-            </label>
-            <select
-              className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
-              value={selectedInput}
-              onChange={(e) => setSelectedInput(e.target.value)}
-            >
-              <option value="">None</option>
-              {inputTemplates.map((t) => (
-                <option key={t.id} value={t.id}>
-                  {t.name}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className="mb-1 block text-xs text-gray-500">
-              Output Template
-            </label>
-            <select
-              className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
-              value={selectedOutput}
-              onChange={(e) => setSelectedOutput(e.target.value)}
-            >
-              <option value="">None</option>
-              {outputTemplates.map((t) => (
-                <option key={t.id} value={t.id}>
-                  {t.name}
-                </option>
-              ))}
-            </select>
-          </div>
-        </div>
-
-        <div>
-          <label className="mb-1 block text-xs text-gray-500">
-            Additional Prompt
-          </label>
-          <textarea
-            className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:outline-none"
-            rows={3}
-            placeholder="Enter additional instructions or requirements..."
-            value={promptText}
-            onChange={(e) => setPromptText(e.target.value)}
-          />
-        </div>
-
+      {/* Additional prompt + Run */}
+      <div className="rounded-lg border border-gray-200 bg-white p-4 space-y-3">
+        <label className="block text-sm font-medium text-gray-700">
+          Additional Prompt
+        </label>
+        <textarea
+          className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:outline-none"
+          rows={3}
+          placeholder="Enter additional instructions or requirements..."
+          value={promptText}
+          onChange={(e) => setPromptText(e.target.value)}
+          disabled={searching}
+        />
         <button
           onClick={handleSearch}
           disabled={
-            searching || (!selectedInput && !promptText.trim()) || !aiAvailable
+            searching ||
+            (inputTemplates.length === 0 && !promptText.trim()) ||
+            (aiStatus !== null && !aiStatus.available)
           }
           className="rounded-md bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed"
         >
@@ -243,44 +289,58 @@ export function SearchPanel() {
         </button>
       </div>
 
-      {/* Errors */}
-      {errors.length > 0 && (
-        <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
-          {errors.map((e, i) => (
-            <div key={i}>{e}</div>
-          ))}
-        </div>
-      )}
+      {/* Progress log */}
+      {(progress.length > 0 || currentStatus) && (
+        <div className="rounded-lg border border-gray-200 bg-white p-4 space-y-2">
+          {currentStatus && (
+            <div className="flex items-center gap-2 text-sm text-gray-600">
+              {searching && (
+                <div className="h-3 w-3 animate-spin rounded-full border border-gray-300 border-t-gray-600" />
+              )}
+              {currentStatus}
+            </div>
+          )}
 
-      {/* Results */}
-      {results.length > 0 && (
-        <div className="space-y-4">
-          <h3 className="text-sm font-medium text-gray-700">
-            Results ({results.length} papers) — Session: {sessionId}
-          </h3>
-          {results.map((r) => (
-            <div
-              key={r.doc_id}
-              className="rounded-lg border border-gray-200 bg-white p-4"
-            >
-              <h4 className="mb-2 text-sm font-medium">{r.doc_title}</h4>
-              <div className="text-sm text-gray-600">
-                <pre className="overflow-x-auto rounded bg-gray-50 p-3 text-xs">
-                  {JSON.stringify(r.fields, null, 2)}
-                </pre>
-                {Object.keys(r.citations).length > 0 && (
-                  <details className="mt-2">
-                    <summary className="cursor-pointer text-xs text-gray-400">
-                      Citations
-                    </summary>
-                    <pre className="mt-1 overflow-x-auto rounded bg-gray-50 p-3 text-xs">
-                      {JSON.stringify(r.citations, null, 2)}
-                    </pre>
-                  </details>
+          <div className="max-h-64 overflow-y-auto space-y-1 text-sm">
+            {progress.map((entry, i) => (
+              <div
+                key={i}
+                className={`py-1 ${
+                  entry.type === "error" || entry.type === "fatal"
+                    ? "text-red-600"
+                    : entry.type === "result"
+                      ? "text-green-700"
+                      : entry.type === "skip"
+                        ? "text-yellow-600"
+                        : "text-gray-500"
+                }`}
+              >
+                {entry.type === "result" && (
+                  <span>
+                    Extracted: <span className="font-medium">{entry.paper}</span>
+                  </span>
+                )}
+                {entry.type === "error" && (
+                  <span>
+                    Error ({entry.paper}): {entry.error}
+                  </span>
+                )}
+                {entry.type === "fatal" && (
+                  <span className="font-medium">{entry.error}</span>
+                )}
+                {entry.type === "skip" && (
+                  <span>
+                    Skipped: {entry.paper} — {entry.reason}
+                  </span>
+                )}
+                {entry.type === "done" && (
+                  <span className="font-medium text-gray-700">
+                    Search complete. Session: {entry.session_id}
+                  </span>
                 )}
               </div>
-            </div>
-          ))}
+            ))}
+          </div>
         </div>
       )}
     </div>

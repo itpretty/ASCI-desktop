@@ -1,4 +1,8 @@
-"""AI service using Claude Code CLI (claude -p)."""
+"""AI service using Claude Code CLI (claude -p).
+
+Uses Claude Code Team account on top priority.
+Falls back to API key if Team account is unavailable.
+"""
 
 import json
 import shutil
@@ -15,6 +19,17 @@ def is_available() -> bool:
     return _find_claude_cli() is not None
 
 
+def check_status() -> dict:
+    """Check Claude CLI availability."""
+    cli = _find_claude_cli()
+    if not cli:
+        return {
+            "available": False,
+            "error": "Claude CLI not found. Install it with: npm install -g @anthropic-ai/claude-code",
+        }
+    return {"available": True, "error": None}
+
+
 def query(prompt: str, system: str | None = None, max_tokens: int = 4096) -> str:
     """Send a prompt to Claude via `claude -p` and return the response text."""
     cli = _find_claude_cli()
@@ -23,22 +38,36 @@ def query(prompt: str, system: str | None = None, max_tokens: int = 4096) -> str
             "Claude CLI not found. Install it with: npm install -g @anthropic-ai/claude-code"
         )
 
+    # Strip null bytes that may come from PDF extraction
+    prompt = prompt.replace("\x00", "")
     cmd = [cli, "-p", prompt, "--output-format", "text"]
     if system:
         cmd.extend(["--system-prompt", system])
+
+    # Use inherited env but remove ANTHROPIC_API_KEY so the CLI
+    # prefers the Team account (OAuth/keychain) over API key auth.
+    import os
+    env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
 
     result = subprocess.run(
         cmd,
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=180,
+        env=env,
     )
 
-    if result.returncode != 0:
-        stderr = result.stderr.strip()
-        raise RuntimeError(f"Claude CLI error: {stderr}")
+    output = result.stdout.strip()
+    stderr = result.stderr.strip()
 
-    return result.stdout.strip()
+    if result.returncode != 0:
+        error_msg = stderr or output or "Unknown error"
+        raise RuntimeError(f"Claude CLI error: {error_msg[:300]}")
+
+    if not output:
+        raise RuntimeError("Claude CLI returned empty response")
+
+    return output
 
 
 def extract_fields_from_chunks(
@@ -51,7 +80,6 @@ def extract_fields_from_chunks(
 
     Returns a dict with 'fields' (extracted data) and 'citations' (provenance).
     """
-    # Build context from chunks
     context_parts = []
     for c in chunks:
         context_parts.append(
@@ -82,11 +110,10 @@ Paper chunks:
 
 Extract all fields defined in the template from the chunks above. Return valid JSON."""
 
-    response = query(user_prompt, system=system, max_tokens=max_tokens)
+    response = query(user_prompt, system=system)
 
     # Try to parse JSON from response
     try:
-        # Find JSON in the response (it may be wrapped in markdown code blocks)
         json_str = response
         if "```json" in json_str:
             json_str = json_str.split("```json")[1].split("```")[0]
@@ -102,32 +129,3 @@ Extract all fields defined in the template from the chunks above. Return valid J
             "fields": {"raw_response": response},
             "citations": {},
         }
-
-
-def parse_template(template_text: str) -> list[dict]:
-    """Use Claude to extract field definitions from a template.
-
-    Returns a list of {name, type, description} dicts.
-    """
-    system = (
-        "You are a template parser. Extract field definitions from the given template. "
-        "Return valid JSON: a list of objects with keys: name, type, description."
-    )
-
-    prompt = f"""Parse the following template and extract all field definitions:
-
-{template_text}
-
-Return a JSON array of field definitions."""
-
-    response = query(prompt, system=system)
-
-    try:
-        json_str = response
-        if "```json" in json_str:
-            json_str = json_str.split("```json")[1].split("```")[0]
-        elif "```" in json_str:
-            json_str = json_str.split("```")[1].split("```")[0]
-        return json.loads(json_str.strip())
-    except (json.JSONDecodeError, IndexError):
-        return []

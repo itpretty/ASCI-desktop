@@ -21,6 +21,10 @@ function App() {
   const [backendStatus, setBackendStatus] = useState<
     "connecting" | "online" | "offline"
   >("connecting");
+  const [aiStatus, setAiStatus] = useState<{
+    available: boolean;
+    error: string | null;
+  } | null>(null);
   const [activePhase, setActivePhase] = useState(1);
 
   useEffect(() => {
@@ -31,21 +35,24 @@ function App() {
         if (resp.ok) {
           setBackendStatus("online");
           failCount = 0;
+          // Also check AI status
+          try {
+            const aiResp = await fetch(`${API_BASE}/search/ai-status`);
+            if (aiResp.ok) setAiStatus(await aiResp.json());
+          } catch {}
         } else {
           failCount++;
         }
       } catch {
         failCount++;
       }
-      // Only show offline after 3 consecutive failures (~15s),
-      // giving the sidecar time to start
       if (failCount >= 3) {
         setBackendStatus("offline");
       }
     };
 
     checkBackend();
-    const interval = setInterval(checkBackend, 3000);
+    const interval = setInterval(checkBackend, 5000);
     return () => clearInterval(interval);
   }, []);
 
@@ -55,24 +62,20 @@ function App() {
       <header className="border-b border-gray-200 bg-white px-6 py-4">
         <div className="flex items-center justify-between">
           <h1 className="text-xl font-semibold tracking-tight">ASCI-Desktop</h1>
-          <div className="flex items-center gap-2 text-sm">
-            <span
-              className={`inline-block h-2 w-2 rounded-full ${
-                backendStatus === "online"
-                  ? "bg-green-500"
-                  : backendStatus === "connecting"
-                    ? "bg-yellow-500"
-                    : "bg-red-500"
-              }`}
-            />
-            <span className="text-gray-500">
-              {backendStatus === "online"
-                ? "Backend connected"
-                : backendStatus === "connecting"
-                  ? "Connecting..."
-                  : "Backend offline"}
-            </span>
-          </div>
+          {backendStatus === "online" && aiStatus && (
+            <div className="flex items-center gap-2 text-sm">
+              <span
+                className={`inline-block h-2 w-2 rounded-full ${
+                  aiStatus.available ? "bg-green-500" : "bg-red-500"
+                }`}
+              />
+              <span className="text-gray-500">
+                {aiStatus.available
+                  ? "Claude CLI available"
+                  : "Claude CLI unavailable"}
+              </span>
+            </div>
+          )}
         </div>
       </header>
 

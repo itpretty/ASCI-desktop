@@ -12,6 +12,10 @@
     "shell:allow-kill",
     "shell:default",
     "dialog:allow-open",
-    "dialog:default"
+    "dialog:allow-save",
+    "dialog:default",
+    "fs:allow-read-text-file",
+    "fs:allow-write-file",
+    "fs:default"
   ]
 }
